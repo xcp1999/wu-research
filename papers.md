@@ -475,3 +475,497 @@ Memory Bridge 不是分布密度估计或成功概率，也不是“进到记忆
 | Physical execution → AMO／robot backend | 直接复用AMO控制权重、adapter和归一化统计；THIRD_PARTY_NOTICES确认与上游发布文件一致，没有本文重训证据。Holosoma运行代码经适配；上游训练配方不归作本文新训练 | 以统一backend连接观测、全身动作与物理状态；公开真机backend尚为NotReleased占位，不能推断可直接部署到用户平台 |
 
 核验边界：仿真backend直接返回渲染真值深度、分割及由模拟器直接读取的机器人／相机位姿，初始语义也由场景资产提供；不能据此认为已解决真机遮挡、定位漂移或开放词汇目标识别。技能有局部物理验证，但高层done被代码明确记为model_claim，任务物理评分另行计算，不能称为通用可靠的任务完成判定。官网真机视频与FAQ展示整链路并承认模型延迟、硬件问题，目前未见论文式统一成功率评测。依据：[仿真观测实现](https://github.com/Stanford-TML/homebody/blob/c09fcf39468e7bab43d744458a53ef1b1265cd6b/src/homebody/backends/mujoco.py)、[技能契约](https://github.com/Stanford-TML/homebody/blob/c09fcf39468e7bab43d744458a53ef1b1265cd6b/src/homebody/skills/contract.py)、[权重来源](https://github.com/Stanford-TML/homebody/blob/c09fcf39468e7bab43d744458a53ef1b1265cd6b/THIRD_PARTY_NOTICES.md)。
+
+## HANDOFF — Humanoid Agentic Task-Space Whole-Body Control via Distilled Complementary Teachers
+
+**重点关注**：False
+
+**开源情况**：[2026-10-16] sim复现未核实（官方WBC依赖）；sim重新训练未核实（SEED版本／依赖）；直接部署未核实（G1 WBC依赖）；缺少材料（完整planner／操作物体／任务rollout）。[官方代码](https://github.com/lzyang2000/HANDOFF)
+
+**基本信息**：阅读日期2026-10-16；arxiv上传：2026-06-04，所读最新v4（2026-09-29）；一作：Lizhi Yang，共同一作未披露；通讯：未披露；单位：California Institute of Technology（Caltech）、Institute for Human & Machine Cognition（IHMC）；是否中稿：未核实，当前官方标注arXiv预印本。[项目主页](https://lzyang2000.github.io/HANDOFF/)，[arxiv](https://arxiv.org/abs/2606.06493)。
+
+**核心问题**：让上层规划器用简洁任务目标调用兼具行走、伸手与跌倒恢复的全身控制器；通过按动作部位和状态分配教师监督，将三种专长蒸馏成一个接受10维指令的策略。对本课题可关注其规划—控制接口与恢复能力，上层空间记忆和技能验证仍需另行设计。
+
+**系统拆解**：语言＋RGB-D→任务分解与目标定位→确定性工具生成10维指令→HANDOFF结合本体历史输出29维关节位置→500 Hz关节PD执行，策略运行50 Hz。指令为`[vx, vy, ωz, z, pL³, pR³]`：平面速度3维、根部高度1维、骨盆坐标系双腕位置6维；腕朝向与夹爪另由工具控制。三个教师用于训练，部署运行一个学生策略。[§III、图2／5](https://arxiv.org/html/2606.06493v4#S3)
+
+| 一级组件／子模块 | 原文内部结构 | 输入 → 处理 → 输出 |
+|---|---|---|
+| Agentic planner → High-level reasoner | regex parsing、LLM fallback | 语言指令→正则拆分，未匹配时调用LLM→原子任务。 |
+| Agentic planner → VLM | 2D point／bounding box、RGB-D投影 | 图像与目标→二维定位、深度反投影、近距离重新查询→机器人坐标系目标；执行不依赖全局场景地图。 |
+| Agentic planner → Waypoint tracker／skill selector | 路径规划、航点跟踪、腕姿态修正、离散夹爪控制 | 目标与阶段→跟踪器给速度，skill selector给高度与腕位置→10维控制指令及额外腕姿态／夹爪命令。 |
+| Whole-Body Control → Whole-Body Control Teacher | 29-DoF motion tracking、asymmetric PPO、CoP／CBF数据校正 | 29维参考关节角＋11帧本体历史→模仿姿态、下蹲与双臂协调→全身教师动作；critic另用特权状态。 |
+| Whole-Body Control → Locomotion Teacher | 15-DoF legs-and-waist policy、gait phase | 速度命令＋本体状态／步态相位→行走与稳定→腿腰动作；训练时参考动作驱动手臂，产生重心扰动。 |
+| Whole-Body Control → Fall-recovery Teacher | 29-DoF AMP、discriminator、fallen resets | 倒地初始化及本体历史→任务奖励＋动作风格先验→起身并恢复行走的全身动作。 |
+| Whole-Body Control → Context-Conditioned Behavior Composition | action-sliced KL、soft MoE student、PPO | 同一仿真状态下查询三个教师→按腿腰／手臂及站立／恢复状态分配KL监督→仅依靠10维指令与本体历史执行的学生。 |
+| Whole-Body Control → Whole-Body Stability Shaping | CoM、capture point、ankle–hip–step、动量变化惩罚 | 质心、接触与动力学状态→构造平衡奖励→共同训练WBC教师、行走教师与学生；AMP保留其恢复目标。 |
+
+**训练、复用与新增**：四阶段均使用mjlab／Rsl-rl，在线仿真PPO；公开默认配置从新网络训练，未指定外部预训练控制checkpoint。学生蒸馏阶段读取前三阶段教师，教师eval／no_grad且不参与学生优化。论文“无任务专用数据或微调”指训练完成后更换任务的执行阶段。每轮4096环境×24步；v4给出WBC／学生最多30K、行走20K、AMP 100K更新。[§III-F](https://arxiv.org/html/2606.06493v4#S3.SS6)、[训练入口与数据流程](https://github.com/lzyang2000/HANDOFF#training-pipeline-run-in-order)
+
+| 对应结构 | 训练、复用与数据 | 作者在本文中的设计 |
+|---|---|---|
+| Agentic planner → High-level reasoner | 规则解析无参数训练；LLM直接调用，未报告本文微调，型号及冻结细节未披露。 | 将语言分解为可执行阶段，保留LLM兜底。 |
+| Agentic planner → VLM | 复用local VLM和ChatGPT APIs，未报告本文微调；型号／checkpoint及冻结细节未披露。RGB-D和重查询为推理输入。 | 二维语义定位接深度几何，近距离更新目标以减小定位误差。 |
+| Agentic planner → Waypoint tracker／skill selector | 确定性工具与几何修正，未报告单独训练技能策略；运行时使用当前目标和状态。 | 统一生成任务空间指令，并补充10维接口之外的朝向与夹爪控制；公开运行总线为18维。 |
+| Whole-Body Control → Whole-Body Control Teacher | 从头PPO；离线BONES／SEED重定向人体动作作参考，仿真产生RL经验。先筛动作，再对准静态下蹲帧做CoP／CBF校正；实际保留clip数未披露。 | 修复部分参考动作的静态稳定性，再学习全身协调；论文校正条件为根高＜0.65 m、平面速度＜0.2 m/s。 |
+| Whole-Body Control → Locomotion Teacher | 从头PPO；速度采样、步态和稳定奖励提供在线监督，手臂参考来自动作库；无需任务遥操作示范。 | 专门补足人体动作跟踪教师在任意速度命令下的行走能力。 |
+| Whole-Body Control → Fall-recovery Teacher | 从头训练PPO actor／critic及AMP判别器；1段跌倒起身＋17段走／跑／转向参考，仓库提供18个NPZ，具体原始来源未披露。奖励为0.25风格＋0.75任务，最多40%环境使用延迟倒地重置。 | 借动作先验学习倒地到站立的转移，并保留站立后跟踪目标的能力。 |
+| Whole-Body Control → Context-Conditioned Behavior Composition | 学生专家随机初始化；以PPO＋冻结教师KL训练编码器、MoE专家和门控。参考经FK生成高度／腕目标，速度独立采样；无需新增任务示范。 | 腿腰KL随命令速度由WBC平滑转向行走教师；手臂保留WBC监督；恢复状态由AMP监督全身。MoE每个expert均输出29维，仅恢复expert显式指定，其余两个自行分配直立行为。 |
+| Whole-Body Control → Whole-Body Stability Shaping | 奖励设计，无单独模型或离线训练集；使用在线仿真接触、质心与动量。域随机化包含载荷、摩擦、PD、驱动力、编码器偏差、手部力和延迟。 | 将相同平衡目标加入相关教师与学生；恢复时允许手／环境接触参与支撑处理。 |
+
+按[表II、§IV-B](https://arxiv.org/html/2606.06493v4#S4)，适配到相同腕目标接口后，HANDOFF的Robust WS为0.277 m³、feasibility 93.0%，SONIC为0.265 m³、96.2%；基线均经同一differential-IK桥接。Robust WS按前方目标凸包体积×feasibility计算，腕误差阈值15 cm，feasibility要求无跌倒且骨盆漂移＜25 cm；优势适用于该接口与指标口径。500个配对倒地初态中恢复率89.6%，成功恢复平均3.2 s；这些成功案例随后全部恢复0.4 m/s行走，Resume的分母为成功恢复案例。
+
+[表III、§IV-D](https://arxiv.org/html/2606.06493v4#S4.SS4)五任务各500次仿真，成功率依次为取放99.8%、左右臂分别取放100%、双臂交接77.6%、蹲姿取物67.2%、取物运输放置72.2%。仿真注入实测1.2–1.6 cm定位误差，并在12 cm夹爪开口条件内使用kinematic grasps。G1＋ZED-M＋Jetson Thor展示前五类真机操作，未报告真机成功率；恢复后任务续接在图6呈现仿真画面，[官网](https://lzyang2000.github.io/HANDOFF/)明确标为仿真。
+
+公开执行后端为MuJoCo，训练框架为mjlab／MuJoCo-Warp。内置ONNX、G1／活动夹爪XML及URDF、网格、房间／桌／垃圾桶资产已发布，已检查引用文件存在。默认sim入口创建平地G1并用刚性载荷块模拟手部质量，未启用活动夹爪；键盘／手柄／VR命令入口已提供。选择含夹爪的任务XML时会导入未发布的`deploy.sim.graspnet_scene`，操作物体本应由它注入；未见Pringles／Cheez-it等物体包、五任务评测与完整抓取rollout脚本。[默认场景与加载](https://github.com/lzyang2000/HANDOFF/blob/main/deploy/sim/sim_policy_node.py#L1009)、[物体注入说明](https://github.com/lzyang2000/HANDOFF/blob/main/deploy/assets/g1/g1_sim2sim_29dof_gripper.xml#L725)。
+
+完整planner尚缺任务解析、VLM语义目标定位、路径／轨迹生成与阶段执行节点。UI可发送语言，但`/molmo/ui/prompt_submit`未见接收者；`/planner/*`目前主要是订阅和显示。MuJoCo相机RGB-D及整幅深度反投影为XYZ点云已有实现，语义目标点到操作目标的完整消费端未发布。常量含Hunyuan／gpt-5.5配置，所指`hy_client.py`、`planner_node.py`等文件缺失，论文实际调用型号仍未核实。[语言发布端](https://github.com/lzyang2000/HANDOFF/blob/main/deploy/sim/sim_policy_node.py#L756)、[反投影](https://github.com/lzyang2000/HANDOFF/blob/main/deploy/sim/sim_policy_node.py#L955)。
+
+Ubuntu基础WBC试跑需匹配ROS2的Python 3.10–3.12、uv与zsh；脚本shebang及语法要求zsh，README的bash示例有出入。此次检查`uv.lock`锁定MuJoCo `3.8.1.dev913242127`的Linux x86_64／Python 3.10、3.12下载链接均返回404，因此收紧此前“sim复现／直接部署”状态，先修复依赖并实际验证；本次未启动仿真或真机。完整语言任务还需补planner、操作物体和任务执行脚本。[依赖](https://github.com/lzyang2000/HANDOFF/blob/main/uv.lock#L1806)、[启动入口](https://github.com/lzyang2000/HANDOFF/blob/main/deploy/play_sim_hand.sh)。重训另需自行生成过滤后SEED PKL／YAML，[BONES-SEED](https://huggingface.co/datasets/bones-studio/seed)需接受许可，README所用v003与当前v004组合尚未完整核实。公开README建议约20K学生checkpoint，v4描述评估末轮，两者对应关系未核实。
+
+**关键 Q&A（2026-10-16）**：Q：主要工作是否集中在WBC，planner从哪里来？A：主要方法贡献是WBC、10维接口和三教师蒸馏；planner属于作者为实验搭建／集成的高层栈，包含复用VLM／LLM及视觉、几何、路径／航点、技能和夹爪工具；图中模块是系统级集合。正则解析是按预设文本模式提取物体／关系并拆分任务，未匹配时用LLM兜底；论文实际规则未发布。视觉定位确定目标像素，深度反投影结合深度和相机内外参得到3D位置，确定性工具按固定规则／数值算法生成控制目标；v1–v3明确写由作者实现具体loco-manipulation栈，具体模型型号与完整集成实现仍未披露。[v1 §3.5](https://arxiv.org/html/2606.06493v1#S3.SS5)。Q：功能上可否视为增强版AMO／HOMIE？A：同属底层运动执行层。HOMIE上层给双臂关节目标，RL负责下身；AMO以上肢关节目标、躯干姿态／高度和速度为条件，通过适配器与RL协调腿腰；HANDOFF直接接双腕位置、统一29维全身动作并整合恢复。增强方向是接口和能力整合，AMO另有显式躯干RPY等控制自由度。[AMO §III](https://arxiv.org/html/2505.03738v1#S3)、[HOMIE §III](https://arxiv.org/html/2502.13013v2#S3)。
+
+Q：WBC能执行任意10维指令吗？A：其职责是结合本体历史跟踪可达／训练覆盖范围内的速度、高度和双腕目标；部署有速度限幅、腕工作空间约束和姿态修正，超范围或相互冲突的目标可产生误差或失稳。Q：语言子任务如何成为10维命令流？A：视觉定位与深度给骨盆系目标，路径／航点跟踪器将导航目标转成速度；近目标由skill selector生成高度与双腕位置，执行中滚动更新。公开辅助代码还能用FK测得的夹爪中心误差做手目标PD修正。原文未充分披露搜索策略、站位选择、轨迹生成、阶段切换与闭爪判据，完整planner发布端也未开放，无法还原完整任务程序。[§III-G／IV-D](https://arxiv.org/html/2606.06493v4#S3.SS7)、[手目标修正](https://github.com/lzyang2000/HANDOFF/blob/main/deploy/common/hand_command_pd.py)。
+
+Q：10维中没有夹爪，如何抓取？A：公开`/g1/command`实际18维＝WBC任务指令10维＋双腕RPY 6维＋左右夹爪各1维。网络读取10维任务字段并结合步态／本体历史；腕姿态由执行层按模式修正或覆盖。夹爪标量0开／1闭由hardware node独立读取、映射到Dex1电机目标，经独立服务执行，绕过WBC的29维身体关节输出；抓取阶段的开闭时机由上层工具负责，完整触发逻辑尚未发布。[命令布局](https://github.com/lzyang2000/HANDOFF/blob/main/deploy/common/command.py#L29)、[策略输入](https://github.com/lzyang2000/HANDOFF/blob/main/deploy/policy/hand_policy.py#L443)、[夹爪执行](https://github.com/lzyang2000/HANDOFF/blob/main/deploy/real/hardware_node.py#L805)。
+
+Q：rhoyn复现了什么，怎么跑通？A：其[issue #3](https://github.com/lzyang2000/HANDOFF/issues/3)／[#5](https://github.com/lzyang2000/HANDOFF/issues/5)报告将官方ONNX移植到自建C++／CUDA＋TensorRT框架，在MuJoCo-Warp和原生PhysX测试站立、行走、转向及抗扰动。当前[适配代码](https://github.com/rhoyn/teleop-walking-benchmark/blob/e957777baefaffe942e03f11c22429d93da3ef5d/policies/handoff/policy.cpp#L59)外部输入3维速度，高度固定0.78 m、双腕位置固定，构造106维当前帧＋11帧历史并映射29维动作到PD目标；无需重训或接入官方ROS2／planner。`handoff_with_arms`使用同一权重并接管全部29关节；15关节版本的双臂由测试程序随机驱动，#5报告后者零命令漂移47–50 cm/s、前者能站稳。第三方已提供WBC运行证据，任务范围未涵盖语言感知与抓取。Ubuntu构建仍需CUDA／TensorRT及两种引擎依赖、GPU架构适配；本次未编译运行。
+
+Q：引用文献或作者其他仓库是否开放了同一planner？A：筛查v4全部51条引用及调用位置，并追查语言／规划相关项；III-G与IV-D没有外部planner来源引用，v1–v3 §3.5明确由作者实现具体栈。SayCan、PaLM-E、RT-2、OpenVLA、WholeBodyVLA、Psi0、Being-0、LeVERB属于背景／相关工作，HERO用于接口对比；未找到完整复用声明。补查[handoff-dev](https://github.com/lzyang2000/handoff-dev/tree/sonic-wbc-teacher)及正式库完整历史，部署部分相同，缺失的MolmoNode／planner_node／hy_client／graspnet_scene仍未找到。作者的[HY-Embodied fork](https://github.com/lzyang2000/HY-Embodied-0.5-X)只增加本地VLM安装说明，[Fast-FoundationStereoPose fork](https://github.com/lzyang2000/Fast-FoundationStereoPose)提供感知工具；二者尚缺HANDOFF集成层。HERO已公开控制训练、权重与MuJoCo桌面demo，demo使用[预设物体语法和已知仿真坐标](https://github.com/RunpeiDong/HERO/blob/416c4e007e2254524322a1771f267a57b6a69994/sim2sim/interactive_client/object_selection.js#L112)，所查代码未包含论文GroundingDINO／SAM／AnyGrasp完整感知集成。 相近系统中，[Being-0](https://github.com/BeingBeyond/Being-0)仅发布资料，其论文明确改造的[Cradle](https://github.com/BAAI-Agents/Cradle)公开了电脑操作agent框架；[SayCan](https://github.com/google-research/google-research/tree/master/saycan)公开桌面拾放Notebook；[LeVERB](https://ember-center-berkeley.github.io/LeVERB-Website/)目前开放数据集，闭环评测仍待发布。OpenVLA／Psi0有模型与代码，WholeBodyVLA未发布完整实现；上述材料均未发现现成HANDOFF 10D集成。
+
+
+## Show-Harness — Show-Harness: Just a VLM Agent Can Play Robots
+
+**重点关注**：False
+
+**开源情况**：[2026-10-19] sim复现（RoboLab）；sim重新训练（LoRA）；缺少材料（完整真机部署）。[代码](https://github.com/showlab/Show-Harness)、[模型](https://huggingface.co/showlab/Show-Harness-VLMs)、[数据](https://huggingface.co/datasets/showlab/Show-Harness-Data)。
+
+**基本信息**：阅读日期2026-10-19；arxiv上传：2026-09-09（所读v1）；一作（共同）：Yanzhe Chen、Zechen Bai、Zhijun Cao、Wenzheng Zeng；通讯：Mike Zheng Shou；单位：Show Lab，新加坡国立大学；是否中稿：未核实，官方引用为arXiv预印本。[项目主页](https://showlab.github.io/Show-Harness/)，[arxiv](https://arxiv.org/abs/2609.10522)。
+
+**核心问题**：怎样把通用VLM的视觉与语言能力转为逐步机器人操作？用共享的离散语义动作连接VLM与确定性机器人解释器，同时支持大模型零样本控制、小模型示范微调和GUI采集。
+
+**系统拆解**：输入语言、多视角RGB、本体状态与短历史；按[§3／图3](https://arxiv.org/html/2609.10522v1#S3)经过Perception → Reasoning → Action闭环。VLM选择细粒度动作，解释器更新笛卡尔位姿目标，再调用阻抗控制／IK／仿真控制器，动作后重观测。默认词表为六个MV方向、GRASP、RELEASE、DONE；按需扩展绕指定轴的旋转，双臂增加STILL。
+
+| 一级组件／子模块 | 原文内部结构 | 输入 → 处理 → 输出 |
+|---|---|---|
+| Embodied Harness Architecture → Perception | Multi-View Guidance、Proprioception | 全局／腕部图像＋高度、接触、夹爪状态 → 视角使用约定与状态文本 → VLM感知上下文。 |
+| Embodied Harness Architecture → Reasoning | 中央VLM；Subtask Planning、Situated Planning、Action Chunking、Adaptive Step、Visual Prompt | 任务、观测和历史 → 子任务分解、按证据分支规划、视觉标记及步长／分块选择 → 语义动作。Planner与Controller是同一VLM的不同调用角色；Situated Planning与Visual Prompt按场景启用。 |
+| Embodied Harness Architecture → Action | Action History、Failure Recovery | 语义动作与执行状态 → 维护近期动作、识别空抓并重置夹爪／回退抓取阶段 → 下一轮上下文和恢复动作。 |
+| Physically Grounded Semantic Action Interface → Embodiment grounding | 解释器g_E；参考视角到运动坐标映射、位姿积分、边界投影 | MV／旋转单元 → 标定步长更新6-DoF末端目标并限制工作区／单步幅度；Franka用Cartesian impedance，AgileX用IK与关节流，仿真用操作空间命令；夹爪命令单独下发。 |
+| GUMI | GUI按键／按钮、动作队列、人机混合采集 | 人类键盘或GUI agent选择同一动作单元 → 同一解释器执行 → 保存动作前图像、语义动作及低层状态，用于监督训练。GUMI是采集接口，位于推理闭环之外。 |
+
+**训练、复用与新增**：ZS默认Gemini-3.1 Pro（medium thinking），直接调用已有模型；FT默认Qwen3.5-2B，基于预训练权重做LoRA。两种模式共享动作接口，FT默认仅用任务、双视图和最近动作，无单独Planner，复杂推理实验再接Gemini子任务指令；基础模型预训练数据未在本文重新披露。
+
+| 对应结构 | 训练、复用与数据 | 作者在本文中的设计 |
+|---|---|---|
+| Embodied Harness Architecture → Perception | ZS读取多视角图像和实时状态，无本文单独感知训练；FT视觉编码器据论文冻结，使用双视图作为推理／监督输入。 | 把视角角色、夹爪高度、接触与步长信息转成可用上下文。 |
+| Embodied Harness Architecture → Reasoning | ZS不微调；FT以动作文本交叉熵监督，语言侧线性层rank64 LoRA，约3%参数，论文称冻结视觉编码器与多模态投影器；实际[训练模板](https://github.com/showlab/Show-Harness/blob/main/train/configs/qwen3_5_2b_lora.yaml)为freeze_vision_tower:true、freeze_multi_modal_projector:false，投影器配置与论文有差异。真机164条episode、7774决策步；Franka101条＋AgileX63条联合训练。sim-to-real另用230条仿真episode、13523步（ManiSkill100条、RoboLab130条），与真机训练路径分开。附录真机40epoch、lr1e-4、batch32、256×256，2B单H200不足2h；当前模板30epoch，数据卡分别记真机40／仿真30。 | 让VLM用原生文本词表预测动作，无专用动作头／新增特殊token；同一接口连接零样本与轻量微调路径。 |
+| Embodied Harness Architecture → Action | 短历史、空抓检测和回退主要为规则／状态逻辑；原文数据含19条Franka抓取恢复片段，用于FT监督，并非在线RL。 | 将可观测失败反馈接回动作选择；子任务完成由VLM依据图像判断，恢复针对抓取状态。 |
+| Physically Grounded Semantic Action Interface → Embodiment grounding | 坐标映射、位姿积分、IK、阻抗控制及边界限制无本文学习训练；需要平台与相机标定。默认细步2cm／粗步4cm，精细实验改1cm；原语语义依赖书面方向约定。 | 将模型共享动作与平台控制拆开；更换机器人时实现对应解释器。代码还要求AgileX混合训练权重部署时交换MV_FWD／MV_BACK。 |
+| GUMI | 人类键盘＋frontier VLM经浏览器采集；同一示范保存语义动作与连续轨迹。π0.5／GR00T基线用这些示范转换的连续末端轨迹微调。终止样本等处理后，[发布数据卡](https://huggingface.co/datasets/showlab/Show-Harness-Data)记真机7933训练样本、仿真13753，与原始决策步分别计数；任务数论文19、数据卡17，存在口径差异。 | 无专用遥操作硬件采集，可人工纠正agent轨迹，统一采集与策略输出接口。 |
+
+[§5.3–5.4](https://arxiv.org/html/2609.10522v1#S5)精细任务改用1cm步长后，ZS成功率60%→82%、FT40%→65%；推理任务ZS配Situated Planning为85%，FT单独10%，接同一Gemini子任务指令后70%。跨具身FT在两种真实机械臂示范上联合训练，未验证只训一种机械臂即可迁移任意新平台。动作表示消融中，有明确物理约定的任意符号接近语义名称；无名称语义且无约定时仅1/20成功，表明方向契约与视觉反馈是关键。§6将人形、灵巧手和更丰富触觉／力反馈列为后续方向；当前实验为固定基座单／双臂平行夹爪操作。对本课题，可研究细粒度动作接口与技能级工具的粒度取舍，人形行走、平衡与全身接触控制仍需另建执行层。
+
+已检查[仿真说明](https://github.com/showlab/Show-Harness/blob/main/docs/simulators.md)、RoboLab运行脚本／配置、短指尖USD、外部RoboLab资产来源、Qwen3.5-2B可访问基座、6组LoRA文件及real/sim数据、转换与训练入口；材料支持RoboLab仿真复现与LoRA重新训练，本次未安装运行。ManiSkill目前仅发布训练数据，仓库明确未含其runner／场景。[Franka说明](https://github.com/showlab/Show-Harness/blob/main/docs/franka.md)要求NUC上的自定义Polymetis／ZeroRPC franka_server，仓库未找到该服务端；[Piper说明](https://github.com/showlab/Show-Harness/blob/main/docs/piper.md)还依赖外部cobot_magic及名为Piper_ros_private-ros-noetic的驱动工作区，其可取得性未核实，因此完整真机部署暂记缺少材料。
+
+
+**关键 Q&A（2026-10-19）**：Q：与VLA有什么区别，为何强调harness？A：本文对照π0.5／GR00T等学习连续动作的VLA；Show-Harness让模型输出有明确物理约定的离散语义微动作，由平台解释器确定性转换成末端目标并调用控制器。VLA也可使用离散token，故关键在语义约定、动作粒度和平台映射位置。ZS直接复用frontier VLM；FT经机器人示范LoRA，从广义“视觉＋语言→动作”定义看也可归入VLA策略，具体实现为语义动作预测。harness强调模型外部的观测组织、提示、规划、历史、步长／分块、失败恢复与解释器；本文主要贡献落在接口和运行框架，两种模型模式共享这一层。默认FT保留最小上下文，ZS使用完整插件组合；示例MV_LEFT→标定位移→阻抗／IK执行，区别于一次调用完整抓取技能。VLA也能接入harness，两者描述模型能力与运行系统两个层面。依据[§3–4、§5.1与附录7.4](https://arxiv.org/html/2609.10522v1)。
+
+
+Q：harness是否指完成任务的系统闭环，π0.5／GR00T也有相关成分吗？A：harness是模型外部运行系统；基本控制闭环为观测→策略推理→执行一段动作→重新观测，任务层进一步组织子目标、成功检查、失败恢复和终止。openpi与Isaac-GR00T部署代码均提供观测处理、策略服务／客户端、动作执行与rollout等运行成分，可视作基础harness。π0.5原文还学习高层语义子任务，再条件生成低层动作块，需区分这项模型能力与外围运行机制；GR00T N1的System 2 VLM＋System 1动作生成属于模型架构。具体部署具备哪些记忆、独立验证或恢复模块，应逐项核对。Show-Harness将这些外围接口／运行机制作为主要研究对象，VLA研究主要围绕模型与训练。依据[π0.5原文](https://arxiv.org/html/2504.16054v1)、[openpi运行说明](https://github.com/Physical-Intelligence/openpi/blob/main/docs/remote_inference.md)、[GR00T N1原文](https://arxiv.org/html/2503.14734v1)、[当前Isaac-GR00T策略指南](https://github.com/NVIDIA/Isaac-GR00T/blob/main/getting_started/policy.md)；后者是当前工程实现，版本与Show-Harness引用的N1分开看。
+## CHOREO — CHOREO: Every Humanoid Skill as a Trajectory
+
+**重点关注**：False
+
+**开源情况**：[2026-10-19] 完全没开源（系统实现）；[官方仓库](https://github.com/ziyisun85-ops/Project-choreo)。
+
+**基本信息**：阅读日期2026-10-19；arxiv上传：2026-09-11（v1）；一作（共同）：Ziyi Sun、Jingwen Chen；通讯：Yuxi Wang、Xiuze Xia（据官方主页）；单位：中国海洋大学工程学院／信息科学与工程学部、中国科学院大学人工智能学院、中国科学院自动化研究所；是否中稿：未核实，作者个人主页标Under Review，未注明会议。[项目主页](https://ziyisun85-ops.github.io/Project-choreo/)，[arxiv](https://arxiv.org/abs/2609.22274)。末位作者HTML／主页为Junyu Dong，arXiv摘要页元数据为Yujun Dong，采用正文署名。
+
+**核心问题**：异构策略、动作数据和生成模型的接口各异；作者将它们的运动输出统一为SkillMotion轨迹资产，通过边界匹配、局部插值和站立桥接实现免重训的人形多动作组合。
+
+**系统拆解**：按[方法／图2](https://arxiv.org/html/2609.22274v1#Sx3)，离线由Source Adapter转换并验证运动，存入SkillMotion库；在线自然语言→LLM排序→运行时解析资产与构造衔接→跟踪器适配→机器人状态反馈下的低层跟踪。原始策略／生成器只在离线产出轨迹，评测在线阶段使用已注册资产。SkillMotion是数据表示；下表保留原文结构及父子关系。
+
+| 一级组件／子模块 | 原文内部结构 | 输入 → 处理 → 输出 |
+|---|---|---|
+| Offline Registration → Source Adapter／validation gate | 源特定导入、重定向、规范化、注释、验证与隔离 | 动作片段／原环境中的RL rollout／生成模型输出 → 统一23-DoF G1、30Hz、关节顺序与坐标，补速度和接触置信度，检查格式、一致性与可跟踪性 → 合格资产入库，失败项隔离。 |
+| SkillMotion | τ、z、入口／出口边界b、执行描述e | 关节位置／速度、根状态、足接触＋语义／来源＋边界窗口＋具身／Tracker配置／验证证据 → 可检索、可拼接的轨迹资产。 |
+| LLM task planner | 有序技能标签／别名；runtime asset resolution | 自然语言 → 语义技能排序 → 解析到已注册SkillMotions；LLM不直接产生关节控制。 |
+| Tracker-Aware Skill Composition and Execution → boundary compatibility／local transition construction | 平面位置和朝向对齐；边界评分；local seam；stable-standing bridge | 相邻轨迹 → 比较关节位置／速度、根高度／线速度与置信加权足接触 → 合适时局部衔接，间隙大时插入预验证站立参考，再连接两端 → 组合参考轨迹。 |
+| Tracker-Aware Skill Composition and Execution → tracker-specific execution | reference adapter、observation adapter、frozen Tracker | 组合参考＋当前机器人状态 → 坐标转换、重采样、参考窗口和Tracker观测 → GMT等跟踪策略输出控制量 → 仿真执行。主实验GMT固定、50Hz；最终动作缩放、PD／力矩接口细节未披露。 |
+
+**训练、复用与新增**：training-free适用于本文注册、组合与执行流程；本文未报告新增学习训练或测试时参数更新，底层跟踪器及上游模型具有既有训练经历。具体冻结与复用情况如下。
+
+| 对应结构 | 训练、复用与数据 | 作者在本文中的设计 |
+|---|---|---|
+| Offline Registration → Source Adapter／validation gate | 确定性转换／修正和验证，无新增学习训练。来源为2969条动作库轨迹、50条预训练RL策略rollout、50条扩散生成动作；具体动作库、RL／扩散模型、checkpoint与原训练数据未披露。它们用作注册／测试资产。 | 以运动输出接入异构来源，并保存验证证据，隔离失败资产。 |
+| SkillMotion | 数据结构，无可训练参数；缺失接触可由运动学推断，无法获得时标unknown且置信度为0。摘要称2950条已准入资产，正文另报3069条导入实例，两者对应关系未解释。 | 统一轨迹、语义、接触、入口／出口和执行契约。 |
+| LLM task planner | 复用LLM，具体型号、checkpoint、冻结配置与是否曾做任务微调未披露；本文未报告训练。评测前固定prompt plans，在线重规划关闭。 | 用技能标签／别名连接自然语言计划与资产注册表。 |
+| Tracker-Aware Skill Composition and Execution → boundary compatibility／local transition construction | 手工特征、权重、尺度与阈值，加插值／桥接，无本文训练；站立参考预验证。预验证站立资产后，新接缝仍须通过实际序列执行检验。 | 根据边界状态选择衔接方式；正文公式(4–6)用五次多项式匹配位置、速度、加速度；摘要／引言／主页称cubic Hermite，存在表述差异，待实现澄清。 |
+| Tracker-Aware Skill Composition and Execution → tracker-specific execution | GMT用于主实验与来源测试，参数冻结；兼容性测试另复用OpenTrack、TWIST2、HoloMotion、SONIC、H-ACT，各冻结。具体权重版本、原训练数据及观测配置未完整披露；本文未重训。 | 按Tracker构造参考与观测适配器；主实验每条序列固定GMT，tracker-aware routing关闭。 |
+
+[实验／限制](https://arxiv.org/html/2609.22274v1#Sx4)：全部为MuJoCo G1仿真；130条固定任务、最长8动作、552个计划边界，固定seed，每任务一次。完成124/130（95.4%），8动作45/48（93.8%），切换成功96.7%；最强8动作基线为固定站立桥41.7%。所有方法共享冻结GMT和任务资产，主要比较衔接设计；执行恢复、在线重规划、跟踪器路由均关闭。来源测试3069条通过导入检查，其中356条做闭环rollout、353条成功（99.2%）；多Tracker测试仅30条共享轨迹、每条最多3秒。尚无真机实验、重复试验方差或物体操作任务成功指标。消融中去掉连续性排序或bridge validation均得到8动作95.8%，高于Full的93.8%；单项贡献需结合跌倒率、其他长度与重复试验判断。
+
+[官方仓库README](https://github.com/ziyisun85-ops/Project-choreo/blob/main/README.md)明确为静态项目页；检查完整文件树及链接，发布内容为HTML/CSS/JS、PDF、图像和视频。唯一smoke_test.py检查页面本地资源引用，未提供Source Adapter、SkillMotion资产、运行／评测入口、Tracker权重与配置、仿真环境或真机部署包；截至核验日材料无法支持本文系统sim复现、sim重新训练或直接部署。本次仅阅读核验，未运行。
+
+## HarnessPro — Recursive Harness Self-Improvement with Pareto Optimization for Performance-Cost Trade-offs
+
+**重点关注**：False
+
+**开源情况**：[2026-10-22] 缺少材料（完整自演化流程、GLM版快照）；[官方代码](https://github.com/pzs19/HarnessPro)。
+
+**基本信息**：阅读日期2026-10-22；arxiv上传：2026-10-19（所读v2：2026-10-20；正文、附录A／B与代表性实现）；一作（共同）：Zhuoshi Pan、ZhiYuan Feng；通讯：H. Vicky Zhao、Jie Tang；单位：清华大学、Z.AI、上海交通大学、华威大学、Kling AI；是否中稿：审稿中，原文标Under review，会议未注明。[项目主页](https://pzs19.github.io/HarnessPro/)，[arxiv](https://arxiv.org/abs/2610.26770)。用户从[微信推文](https://mp.weixin.qq.com/s/TtjRoi5vYL5zrY0NZFbi5w)补充原论文链接；本次依据原论文与代码，推文正文未读取。
+
+**核心问题**：让编程智能体根据历史执行轨迹自动改进harness，同时优化任务通过率和调用成本，输出适配不同预算的lite／medium／heavy方案。
+
+**系统拆解**：按[§3–4／算法1](https://arxiv.org/html/2610.26770v2#S4)，优化对象包括指令、skills、工具、上下文机制、hooks和验证规则。先从初始harness的执行生成固定测试；随后循环“运行任务→诊断→提出三类修改计划→编辑候选→验证与筛选”，每轮最多保留三个候选。下面四项为原文agent角色，最后一项为选择算法；最终部署产物是选中的harness。
+
+| 一级组件／子模块 | 原文内部结构 | 输入 → 处理 → 输出 |
+|---|---|---|
+| Trajectory Analyzer | 多次rollout联合诊断 | 任务、执行轨迹、测试结果、token／成本／时延 → 定位失败与冗余开销 → 带证据路径的诊断。 |
+| Evolution Planner | 成本优先／均衡／性能优先三类指令；候选间代码差异比较 | 诊断、指标、harness实现及同轮候选差异 → 三份通用修改计划。 |
+| Harness Editor | 独立工作区、Git版本管理 | 父harness＋计划＋诊断 → 修改指令、工具和运行规则 → 可执行候选。 |
+| Test Synthesizer | 根据任务生成可执行测试 | 任务说明＋初始执行轨迹 → 一次生成测试并固定，供后续候选统一评估；最终测试集使用官方评测。 |
+| Candidate filtering and selection（算法） | 初始通过率门槛、Pareto筛选、归一化加权平方距离 | 验证集通过率与成本 → 去除低于初始水平及被其他候选支配的方案 → 选择三档代表，进入下一轮。 |
+
+**训练、复用与新增**：方法通过LLM调用和代码搜索更新harness，未报告大模型参数训练／微调。实验使用GPT-5.5＋Codex 0.147.0、GLM-5.2＋Claude Code 2.1.231。数据来自Terminal-Bench 2、SWE-Bench Pro、ProgramBench的任务说明与自行执行的轨迹；每个基准用DPP选10个训练任务，每候选每任务每轮运行3次；其余开发任务用于验证，最终测试分别留出59／100／100题。前两基准演化3轮，ProgramBench为4轮。
+
+| 对应结构 | 训练、复用与数据 | 作者在本文中的设计 |
+|---|---|---|
+| Trajectory Analyzer | 复用LLM；输入为训练任务的轨迹与指标，超长诊断再摘要。 | 同时解释失败及开销，并给出可追溯证据。 |
+| Evolution Planner | 复用LLM；使用诊断、候选代码和指标，验证／测试题对planner隐藏。 | 三种成本—性能偏好的计划，以及候选间经验共享。 |
+| Harness Editor | 复用编码agent；更新软件文件，搜索从现成Codex／Claude Code harness开始。 | 计划落地、隔离候选和可回溯版本。 |
+| Test Synthesizer | 复用LLM从任务及初始轨迹合成测试；演化时使用这些测试提供反馈，官方答案与测试保留给最终评测。 | 用固定可执行测试检验候选产物；论文初步实验中失败召回率由直接LLM判分的41.7%提高到83.3%。 |
+| Candidate filtering and selection（算法） | 确定性规则，无参数训练；输入为验证集统计。 | 性能门槛＋Pareto筛选；三档性能／成本权重为(1,2)、(1,1)、(2,1)。 |
+
+[表2／§5.3](https://arxiv.org/html/2610.26770v2#S5)：GPT-5.5下，Heavy相对RHO在三个基准平均提高2.0个百分点、降低单任务成本26.1%；Terminal-Bench 2为76.3%→80.8%、每题$1.09→$0.72。报告成本覆盖最终harness执行任务的模型调用；前期演化费用与摊销周期待评估。ProgramBench报告的是逐任务测试通过比例的宏平均。主要改进包括任务条件的推理／工具预算分配、分阶段hooks、可恢复的工具输出压缩和指令精简。
+
+[发布说明](https://github.com/pzs19/HarnessPro/blob/main/docs/evaluation.md)已提供9套GPT-5.5演化产物、三基准评测入口和运行适配器；完整递归演化入口未见，GLM版快照明确未发布。运行需Linux、Docker、模型API及另取基准数据／镜像；复用RHO运行代码、ProgramBench／Pier评测与RTK。本次仅静态核验，未运行。研究对象为软件任务；对人形harness可借鉴轨迹诊断、离线候选评测和多目标选择，机器人侧需另定义成功检查、物理执行成本及安全约束。
+
+## WBD — Whole-Body Dexterity
+
+**重点关注**：False
+
+**开源情况**：[2026-10-26] 缺少材料（完整训练与真机部署包）；[项目主页](https://wholebodydex.com/)。
+
+**基本信息**：阅读日期2026-10-26；arxiv上传：2026-10-15（v1；20页，已核对正文方法／实验及附录A–G的相关细节）；一作（共同）：Conor Mc Gartoll、An Dang、Pranay Thangeda；通讯：未明确标注，Mustafa Mukadam、Manikantan Nambi标为共同指导；单位：Amazon、加州大学圣迭戈分校、密歇根大学；是否中稿：未核实。[项目主页](https://wholebodydex.com/)，[arxiv](https://arxiv.org/abs/2610.22184)。由未来机器人Lab的[小红书笔记](https://xhslink.cn/o/65PaKZE7JKf)定位；以下结论依据论文原文与官方项目页。
+
+**核心问题**：让机器人利用双臂与躯干的接触、滑动和滚动，在身体不同区域之间稳定转移物体，并将人类粗略动作修正为可靠的接触操作。
+
+**系统拆解**：依据[原文§III–IV与附录G](https://arxiv.org/html/2610.22184v1)，离线流程为抓持生成→逐物体RL专家→统一控制器蒸馏；真机流程为Xsens人体动作→GMR上肢目标→WBD修正→关节执行，AMO负责下肢与平衡。专家训练中腰与下肢固定，控制14个手臂关节；手指固定为闭合姿态。本文学习的接触操作范围是手臂／躯干，腿部接触为后续方向。
+
+| 一级组件／子模块 | 原文内部结构 | 输入 → 处理 → 输出 |
+|---|---|---|
+| Whole-Body Grasp Generation | 接触区域划分、能量优化、仿真扰动筛选与体素化 | 机器人模型、物体网格、接触区域 → 优化并验证稳定性 → 左臂／双臂／右臂抓持库及目标图。 |
+| WBD-EX Training | 目标条件PPO；球体预训练→其他物体warm-start | 特权状态、物体目标位置与抓持模式 → 学习连续换抓 → 每物体专家；左右单臂换持须经过双臂模式。 |
+| WBD Controller Distillation → trajectory collection | escapability初态筛选、冻结专家rollout、轨迹质量过滤 | 稳定抓持库＋已训专家 → 按换抓成功率筛选初态，采集并清理轨迹 → 蒸馏数据。 |
+| WBD Controller Distillation → conditional diffusion model | 本体历史编码、物体几何条件、命令梯度引导 | 本体历史＋5维几何描述＋粗略动作命令 → 多候选去噪与选择 → 未来手臂关键点位移。 |
+| WBD Controller Distillation → inverse-dynamics network | 残差网络、关节增量与执行限幅 | 历史状态＋生成的关键点运动＋几何 → 14维手臂关节目标增量。 |
+| 真机接入（§IV-C／附录G-F）→ GMR／AMO | 人体动作重定向、独立下肢控制、命令发布 | Xsens动作 → GMR上肢参考供WBD修正；AMO下肢平衡／行走 → G1执行。 |
+
+**训练、复用与新增**：学习数据主要由作者的仿真流程产生，真人遥操作用于真机测试。部署的WBD控制器经仿真训练后零样本迁移到G1；输入包含本体状态和预先测量得到的物体几何描述，专家训练可读取物体位姿、速度及接触信息，蒸馏控制器在线使用本体历史与静态几何描述。
+
+| 对应结构 | 训练、复用与数据 | 作者在本文中的设计 |
+|---|---|---|
+| Whole-Body Grasp Generation | 几何优化与物理筛选，无学习参数；15个球／立方体／棱柱／圆柱，尺寸80–240毫米，得到251万稳定抓持。 | 躯干分区、接触模式与稳定性筛选，形成可供RL采样的初态／目标。 |
+| WBD-EX Training | 在mjlab中训练PPO专家：180／200／220毫米球体从头训练，其余物体以自训球体专家的actor、critic、优化器、归一化器及课程状态warm-start；在线仿真生成经验，随机化质量、质心、摩擦及外力。 | 按物体位置与抓持模式奖励连续换抓；逐渐增大目标距离。 |
+| WBD Controller Distillation → trajectory collection | 冻结专家；对251万抓持各采样128个目标评估换抓能力，再按物体筛掉10%–60%的低分初态；rollout质量过滤后约27.4万轨迹、8.73亿帧。 | 保留空间／模式覆盖，提高可用轨迹比例29.0%→32.5%；失败轨迹可保留合格前缀，丢弃失败前100帧。 |
+| WBD Controller Distillation → conditional diffusion model | 采用DexterityGen的扩散／状态编码器配置并适配；本文训练，未报告复用其预训练权重。使用上述仿真轨迹，按物体均衡采样并做左右镜像；4帧本体历史＋5维几何共269维输入，预测未来100／200毫秒关键点位移。 | 跨物体几何条件与本体历史，学习稳定换抓运动先验；粗命令引导推理。 |
+| WBD Controller Distillation → inverse-dynamics network | 与扩散模型联合训练13万次AdamW更新；监督来自专家实际关节目标增量，输入混合专家和扩散生成运动；未报告外部checkpoint初始化。 | 将关键点运动转为可执行关节增量。两网络合计每个控制器约22 H100 GPU小时；推理每次生成16个候选，使用12步DDIM。 |
+| 真机接入（§IV-C／附录G-F）→ GMR／AMO | 复用GMR、AMO与Xsens；本文未报告重新训练AMO，具体权重版本未披露。SONIC公开checkpoint用于对照。 | 接通遥操作、WBD上肢修正与下肢控制；实时推理使用操作者工作站RTX 5090。 |
+
+真机实验由一位接受过8小时以上任务训练的操作者执行：篮球与15厘米纸箱各做肩部触碰、腋下夹持往返，每项10次；另做10次纸箱货架到桌面搬运。综合WBD为45/50（90%），GMR为9/50（18%），SONIC为2/50（4%）；完整搬运链分别7/10、1/10、0/10。G1部分手臂包覆防滑胶带。90%适用于这组遥操作任务。仿真泛化测试以13种物体训练、留出180毫米球体与立方体，三次训练种子；真机控制器使用全部15种物体训练。专家能力随物体变化显著，200毫米立方体及两种较大棱柱的完整绕身loop成功率接近零，表VIII给出分项结果。官网提供交互专家演示，所查官网和论文未给出完整代码仓库、训练数据下载或真机部署入口，代码仓库未能确认；未运行复现。对本项目可作为“粗动作参考→接触稳定修正”的技能后端参考，高层目标与任务编排需另行设计。
+
+[附录E／F／G](https://arxiv.org/html/2610.22184v1)：代表性8卡H100运行中，球体预训练1.5万轮约270 GPU小时，各目标物体后训练3.5万轮约660–815 GPU小时，从头训练5万轮约1,030 GPU小时；270 GPU小时可在多个目标间摊销。上述为专家训练，抓持生成、约3.2亿次换抓评分和轨迹采集另有开销。warm-start比较每条件一个训练种子；初态筛选的部分路线提升采用选阈值的同组试验，独立采集比较提供29.0%→32.5%的可用率依据。本文核心贡献是接触模式约束下的连续换抓训练与可部署的动作修正控制器，高层任务目标仍由操作者提供。
+
+## SuperMimic — Scaling Humanoid Whole-Body Control with One Differentiable World Model
+
+**重点关注**：False
+
+**开源情况**：[2026-11-05] 缺少材料（官方 sim复现、sim重新训练、G1直接部署包）；[官方交互演示](https://supermimic.github.io/demo/)。
+
+**基本信息**：阅读日期 2026-11-05；arxiv上传：2026-10-20（v1，正文及附录A–G）；一作：Qiayuan Liao，Yiyang Shao／Junfeng Long标注等贡献；通讯：未明确标注，Pieter Abbeel／Koushil Sreenath标注共同指导；单位：UC Berkeley；是否中稿：是，CoRL 2026 Oral（arXiv及作者主页）；[项目主页](https://supermimic.github.io/)，[arxiv](https://arxiv.org/abs/2610.28480)，[论文原文](https://arxiv.org/pdf/2610.28480)。
+
+**核心问题**：大规模动作跟踪的无模型RL训练昂贵；用一个跨动作共享的可微动力学模型生成短轨迹并反向传播，低成本训练统一人形全身控制策略。
+
+**系统拆解**：依据[原文§3／图2、附录A–D](https://arxiv.org/pdf/2610.28480#page=4)，训练循环为 Collect data → Fit world model → Improve policy。执行时，未来10帧动作参考经motion encoder变为32维latent，与最近10帧本体观测送入shared decoder，输出29维归一化关节设定值，再映射到PD关节目标。world model与critic用于训练；真机运行跟踪策略。额外研究velocity encoder，将速度命令接到同一decoder。
+
+| 一级组件／子模块 | 原文内部结构 | 输入 → 处理 → 输出 |
+|---|---|---|
+| Collect data | MuJoCo Warp、固定容量replay buffer、return-based reset sampling | 当前策略＋参考动作 → 加动作噪声执行、优先练习低回报片段 → 状态／实际动作／随机化上下文及监督标签。 |
+| World model | Dynamics MLP＋reward／observation／termination heads，heads可学习或解析计算 | 状态、动作、摩擦／标定偏移／躯干质心等上下文 → 预测下一状态、奖励、无噪观测及终止概率。 |
+| Policy → Motion encoder | MLP (2048,1024,512,256)，tanh latent | 未来10帧参考 → 32维动作latent。 |
+| Policy → Shared decoder | MLP (2048,1024,512,256) | latent＋最近10帧本体观测 → 29维动作 → 默认姿态＋动作缩放 → PD执行。 |
+| Critic | 每接口一个MLP (256,128)，GAE回报目标 | 预测状态、目标、仿真上下文 → 32步想象窗口以后的回报估计。 |
+| Policy → Velocity encoder（下游初步实验） | MLP (256,256)，共享decoder和world model | 目标(vx,vy,ωz)＋本体历史特征 → 32维latent → 相同decoder与执行接口。 |
+
+**训练、复用与新增**：上述学习网络由本文训练，未报告加载外部预训练checkpoint；具体随机初始化方案未披露。训练数据分为动作参考与在线仿真转移；未报告使用真机数据拟合world model。依据[§3、§4.5、附录B–G](https://arxiv.org/pdf/2610.28480#page=5)。
+
+| 对应结构 | 训练、复用与数据 | 作者在本文中的设计 |
+|---|---|---|
+| Collect data | 复用MuJoCo Warp和G1重定向动作；BONES-SEED原始142,220段经名称／物理可行性筛选，保留129,514段、264.56小时。4096并行环境／GPU生成在线转移；LAFAN1的40段、2.45小时用于受控对照和消融。 | 50%均匀、40%当前低回报、10%历史困难权重的重置采样；有界buffer保留旧策略经验。 |
+| World model | 本文持续更新；动力学MLP为(2048,2048,2048)。以buffer中8步自回归窗口监督状态与适用heads；heads逐项采用学习还是解析实现未完整列明。 | 跨所有动作共享动力学；显式输入仿真随机化参数，观测噪声在模型外添加，终止概率提供可微存活权重。 |
+| Policy → Motion encoder | 本文训练；参考来自上述动作库。与decoder通过32步想象轨迹的回报梯度联合更新，采用BeyondMimic跟踪奖励的修改版。 | 用未来10帧参考编码目标；BPTT穿过固定权重的world model获取策略梯度。 |
+| Policy → Shared decoder | 本文训练；监督信号来自想象回报，经验由当前策略的仿真采集产生。motion-tracking目标更新decoder；下游velocity目标对decoder权重stop-gradient。 | 单一decoder统一动作执行；不经过逐动作专家再蒸馏的主训练流程。 |
+| Critic | 本文训练；目标来自想象轨迹的GAE回报，γ=0.99、λ=0.95；每接口独立critic。策略更新时其权重固定，随后拟合价值目标。 | 用窗口末端价值补足长期回报，支持短窗口学习与受扰后的恢复。 |
+| Policy → Velocity encoder（下游初步实验） | 与motion接口并行训练：RL版用速度跟踪奖励，并以参考命令rollout作latent对齐；蒸馏对照版从参考动作读取速度、用跟踪奖励训练。共享decoder持续由motion目标更新，velocity目标仅更新该encoder。 | 直接用接口任务奖励学习速度控制。在672个速度阶跃响应中，RL版650项稳态误差更小，对照15项更小、7项跌倒。 |
+
+[§4.1／附录F](https://arxiv.org/pdf/2610.28480#page=6)：单H100训练3小时超过SONIC公开checkpoint的归一化回报，失败25／129,514段；双H100训练9.8小时为0段，SONIC为179段。3小时含采样、模型与策略／critic训练，checkpoint评测另计。SONIC报告128张L40训练168小时、611小时动作数据；本文使用264.56小时。评测用两者训练集中的共同动作，每段从首帧执行一次，摩擦1.0、无随机化与观测噪声，以本文根部高度／倾斜阈值判失败，衡量训练动作覆盖。LAFAN1受控对照中，本文单卡1.2小时达到0.82回报，PPO-Sim在18小时预算内未达到。
+
+[§4.4／§6](https://arxiv.org/pdf/2610.28480#page=8)：同一策略在G1展示跳步、侧滚、90°及360°翻转，无逐动作调参；未给出真机重复试验成功率。训练限平地，地形与物体交互列为后续工作。对当前研究，可作为参考动作／速度条件的全身执行后端候选；任务语义、物体状态与高层技能编排仍需设计接口。
+
+官方项目页与一作主页未链接本文训练仓库；[演示许可](https://supermimic.github.io/demo/LICENSE.html)将策略／世界模型及演示程序列为专有材料，允许官网浏览器中的个人非商业交互，限制提取和复用。未找到完整训练入口、可复用checkpoint及真机部署说明；[BONES-SEED](https://huggingface.co/datasets/bones-studio/seed)提供G1数据，下载须登录接受条款。本条开源结论针对官方材料；第三方实现的局部代码核对见下方Q&A。本次静态核验，未运行仿真或部署。
+
+**关键 Q&A（2026-11-05）**：Q：model是动力学世界模型，policy负责动作，两者像PhysHSI的AMP与policy一样共同训练吗？A：两者在同一训练过程内持续更新；所查[第三方训练循环](https://github.com/CuboiLeo/SuperMimic-Reproduced/blob/main/src/supermimic/training/loop.py#L190)按采样→更新world model→更新policy执行。[策略更新](https://github.com/CuboiLeo/SuperMimic-Reproduced/blob/main/src/supermimic/imagination/policy_trainer.py#L66)暂时固定world model与critic权重，沿想象轨迹反向传播，只更新policy，随后恢复并训练critic。世界模型学习状态转移，帮助计算动作后果及梯度；PhysHSI的AMP判别器学习参考／策略动作分布，提供风格奖励，policy以PPO更新，风格奖励在no_grad下计算。两者共同迭代的关系相似，辅助模型的职责与策略梯度路径不同。此第三方仓库为独立复现，本次只核对训练循环、模型／策略训练器与想象rollout，未运行。
+
+Q：GT、WM监督与并行rollout分别是什么？A：所查第三方实现的[跟踪奖励](https://github.com/CuboiLeo/SuperMimic-Reproduced/blob/main/src/supermimic/envs/mdp/rewards.py#L101)为手写的身体位姿／速度参考误差评分与正则项，policy最大化想象轨迹累计回报；[WM监督](https://github.com/CuboiLeo/SuperMimic-Reproduced/blob/main/src/supermimic/world_model/world_model.py#L65)为MuJoCo实际转移状态与终止标签，用8步自回归预测误差训练。动力学主干输入状态、动作和仿真上下文，人体参考用于目标／奖励及终止判断。物理采集使用MuJoCo Warp／mjlab，[默认4096环境](https://github.com/CuboiLeo/SuperMimic-Reproduced/blob/main/src/supermimic/config.py#L25)，持续补充replay buffer；policy更新从buffer起点并行展开4096条×32步WM轨迹。两层都需要rollout，效率来自经验复用、神经动力学推演和穿过模型的动作梯度；相邻时间步依赖上一状态，多条轨迹可并行。PhysHSI则主要在Isaac Gym中采集物理轨迹，以任务／AMP奖励通过PPO更新策略。
+
+Q：更新policy时奖励用实际状态还是WM预测，rollout指什么？A：rollout是从初态开始，反复生成动作、推进状态并记录奖励得到的一段轨迹。所查[imagine循环](https://github.com/CuboiLeo/SuperMimic-Reproduced/blob/main/src/supermimic/imagination/rollout.py)先从buffer取实际仿真起点，之后每步把WM预测状态反馈给policy；[ImagStep](https://github.com/CuboiLeo/SuperMimic-Reproduced/blob/main/src/supermimic/imagination/compiled.py#L38)先wm.step得到s_next，再由FK和手写奖励函数比较该预测状态与ref，产生想象奖励。本循环先算奖励、再推进参考帧；不调用MuJoCo的env.step。32步预测奖励、生存权重与末端critic价值构成目标J，loss=-J/H，经backward更新policy；固定WM参数仍保留预测对动作的梯度。
+
+Q：Policy多大，结构由复现者自定吗？A：论文附录C表A.4给出motion encoder与decoder各用(2048,1024,512,256)隐藏层、32维latent。第三方实现为680→2048→1024→512→256→32与962→2048→1024→512→256→29，合计8,891,197参数；激活、初始化等未披露细节由实现补充。执行只需policy。4090服务器实测同结构FP32、batch=1、输入已在设备上，500次前向中位延迟0.114毫秒；CPU单线程0.793毫秒。范围为网络前向。
+
+Q：另外两个SuperMimic仓库改了什么？A：[shuayyy/humanoid-amp-ppo](https://github.com/shuayyy/humanoid-amp-ppo)独立实现SuperMimic，并保留另一套AMP-PPO；将WM状态从71维扩展到含箱体位姿／速度的84维，增加箱体观测、参考、位姿奖励、终止条件与质量／摩擦随机化，比较walk／squat／lift上的SuperMimic与PPO-Sim。核心仍为8步WM监督与32步想象BPTT；采样采用失败驱动，区别于论文回报驱动。其结果文档注明旧评测两算法观测噪声不同，修正后尚未重评。[NJU-R-L-Group-Embodied-Lab/SuperMimic-Repro-Sim2Real](https://github.com/NJU-R-L-Group-Embodied-Lab/SuperMimic-Repro-Sim2Real)基于CuboiLeo复现，增加BONES-SEED数据处理／训练、GVHMR→GMR视频动作管线、自定义舞蹈微调、ONNX与G1部署（50 Hz policy、500 Hz命令、C++ DDS bridge）、sim2sim与日志检查；针对真机增加腰部耦合、延迟／阻尼／IMU饱和建模及奖励与reset选项。发布基础／舞蹈模型；v1.1单舞蹈策略加入87个真机失败状态作仿真reset，报告同checkpoint连续完成两次，父checkpoint未发布且无逐项消融。[实现审计](https://github.com/shuayyy/humanoid-amp-ppo/blob/master/docs/supermimic/paper_fidelity.md)、[真机训练配方](https://github.com/NJU-R-L-Group-Embodied-Lab/SuperMimic-Repro-Sim2Real/blob/main/scripts/train/train_lean35kfs_e24.sh)。2026-11-05核对文档与核心源码，未运行这两个仓库。
+
+Q（2026-11-08）：小红书评论说SuperMimic与VLA解决不同问题，是什么意思？A：前者主要学习参考条件的全身动作跟踪，VLA从视觉与语言生成任务动作；帖子问的是训练范式迁移。可微动力学与想象优化可作为操作策略训练候选，须验证物体／接触建模、观测生成、奖励与迁移效果，现有动作跟踪加速结果尚未覆盖多数VLA任务。来源：[原帖](https://xhslink.cn/o/8oSVWyhgT4K)、[SuperMimic论文](https://arxiv.org/abs/2610.28480)、[OpenVLA](https://openvla.github.io/)。
+
+## PhysHSI — Towards a Real-World Generalizable and Natural Humanoid-Scene Interaction System
+
+[论文](https://arxiv.org/html/2510.11072v1) · [项目主页](https://why618188.github.io/physhsi/) · [代码](https://github.com/InternRobotics/PhysHSI) · 2026-11-16
+
+**核心问题** 如何用少量人体示范训练全身策略，让 G1 在物体尺寸和位置变化时，仍能自然地搬箱、坐下、躺下和起身。
+
+**推理数据流** 人工粗定位 + LiDAR 里程计 + 近距离 AprilTag → 物体位姿。物体位姿、尺寸、任务目标和本体观测的历史 → Actor → 29 维动作 → 缩放后加到默认关节角 → PD 计算力矩 → G1 执行。
+
+**训练数据流** AMASS／SAMP 人体动作 → 重定向到 G1、标注物体轨迹 → 参考片段。参考片段与 Isaac Gym 在线采样的片段 → 训练 AMP 判别器 → 风格奖励与任务、正则奖励合并 → PPO 按任务更新 Actor 和 Critic。参考片段也用于初始化部分仿真回合。
+
+**开源情况** 仿真可推理、可重新训练（6 项任务，已公开权重、训练代码和参考动作数据）。真机复现缺 G1 部署入口和 FAST-LIO／AprilTag 集成代码。
+
+**作者** 王华艺、张文涛（并列一作）。通讯作者为陈启峰、王靖博、庞江淼。署名单位为上海人工智能实验室、香港科技大学。
+
+**录用** 第一作者标为在审，未查到公开录用记录。
+
+## PHP — Perceptive Humanoid Parkour: Chaining Dynamic Human Skills via Motion Matching
+
+**重点关注**：False
+
+**开源情况**：[2026-11-05] sim复现（发布学生示例）、sim重新训练（公开动作库与训练配方）；缺少材料（完整论文技能checkpoint、G1真机部署说明）；[官方代码](https://github.com/amazon-far/php_parkour)。
+
+**基本信息**：阅读日期 2026-11-05；arxiv上传：2026-02-17（所读v2：2026-05-06，正文及附录）；一作（共同）：Zhen Wu、Xiaoyu Huang、Lujie Yang；通讯：未明确标注，项目页面另有team co-lead标记；单位：Amazon FAR、UC Berkeley、CMU、Stanford；是否中稿：是，[RSS 2026正式论文集](https://www.roboticsproceedings.org/rss22/p020.html)；[项目主页](https://php-parkour.github.io/)，[arxiv](https://arxiv.org/abs/2602.15827)。
+
+**核心问题**：将稀少的高动态人体动作离线组合为多样的接近—越障—离开参考，再经特权专家和DAgger＋RL训练统一深度视觉策略，连续跨步、攀爬和撑越障碍。
+
+**系统拆解**：依据[原文§III／图2](https://arxiv.org/html/2602.15827v2#S3)，离线为Skill Composition via Motion Matching → Motion-Tracking Experts → Unified Student。部署输入机载深度、本体状态及离散二维速度命令，学生直接输出29关节PD目标；技能选择和转换由统一学生根据观察产生。Motion matching在离线生成训练参考时使用。
+
+| 一级组件／子模块 | 原文内部结构 | 输入 → 处理 → 输出 |
+|---|---|---|
+| Skill Composition via Motion Matching | 最近邻特征检索、进出技能窗口、inertialization、地形配对 | 重定向人体行走／跑酷片段＋速度命令 → Locomotion→Parkour Skill→Locomotion拼接；改变接近距离、速度、朝向与障碍 → 长参考轨迹及配对地形。 |
+| Learning a Highly-Dynamic Visuomotor Policy → Motion-Tracking Experts | 每技能专家、PPO、global tracking、adaptive sampling | 参考动作、特权机器人状态＋0.7×0.7米height scan → 学习跟踪并适应地形扰动 → 专家动作。 |
+| Learning a Highly-Dynamic Visuomotor Policy → Unified Student | depth CNN＋策略MLP、DAgger＋PPO及课程 | 深度图、本体观测、速度命令 → 视觉条件的统一动作决策 → 29关节PD目标，连续完成越障。 |
+
+**训练、复用与新增**：与上表逐项对应；本文训练专家及学生，未报告使用外部预训练策略或视觉checkpoint。学生训练时专家固定提供标签；学生自身视觉编码器与控制网络参与训练。[§III-C／附录A–B](https://arxiv.org/html/2602.15827v2#S3.SS3)。
+
+| 对应结构 | 训练、复用与数据 | 作者在本文中的设计 |
+|---|---|---|
+| Skill Composition via Motion Matching | 复用OmniRetarget将人体动作重定向到G1；motion matching为检索与拼接，无网络参数训练。原始库含495.5秒locomotion，各跑酷类别约1.5–12.1秒；手工标注技能起止及配对地形。 | 用共享locomotion连接异质技能，密集覆盖入场步态／距离／时机，随机化地形和干扰物；技能主体执行期间暂停匹配，保持接触动作。 |
+| Learning a Highly-Dynamic Visuomotor Policy → Motion-Tracking Experts | 本文用PPO训练，数据为合成参考与在线仿真经验，沿用BeyondMimic／OmniRetarget的跟踪设计；未报告复用其权重。论文专家／学生各2万轮、16384并行环境；具体初始化方案未披露。 | global tracking纠正位置／时序漂移；adaptive sampling集中学习困难片段；全专家统一action scale=1。 |
+| Learning a Highly-Dynamic Visuomotor Policy → Unified Student | 固定专家，在学生rollout上取动作标签；视觉用WARP渲染深度，3层CNN＋5层MLP。DAgger权重从1降至0.1，PPO逐渐增强；专家阈值外的学生状态屏蔽DAgger标签。未报告真机训练数据或策略微调。 | 成功回报纠正逐步模仿对短时大动作的低估；放宽终止阈值，保留DAgger约束动作自然度，均匀采样技能；模拟相机外参、深度噪声和60–80毫秒延迟。 |
+
+[§IV／表I–II](https://arxiv.org/html/2602.15827v2#S4)：G1从起跳到站稳用3.63秒攀上1.25米平台；撑越示例峰值3.41米／秒；多障碍演示中可适应约0.5米障碍位移。导航仍由外部二维速度命令控制。单障碍仿真按每任务100个初始条件×5次测试，表I在1／2米每秒命令下跨36／58／76厘米障碍为100%／99%／95%；这些为仿真统计，真机主要报告动作与长链演示，未给对应重复成功率。表II中纯DAgger在1米每秒、76厘米攀爬仅3%，本文95%，支持RL在蒸馏中补足成功信号。
+
+[发布说明](https://github.com/amazon-far/php_parkour/blob/main/README.md)、[训练指南](https://github.com/amazon-far/php_parkour/blob/main/wbt_training/README.md)和[仿真指南](https://github.com/amazon-far/php_parkour/blob/main/wbt_training/DEPLOY.md)提供motion-matching数据库、地形、生成脚本、固定Holosoma依赖、专家／学生训练和ONNX导出入口，以及MuJoCo启动脚本。训练需Linux／NVIDIA与IsaacSim；现成数据涵盖locomotion、低／高速step及低／高速climb-76共5类，亦可用公开数据库生成其他场景。官方student release仅发布depth_backbone.onnx＋student.onnx，覆盖示例能力；未发布原始.pt／teacher checkpoints。当前公开训练实现有自己的DAgger残差门控等配置，论文线性课程按原文另记。DEPLOY.md说明范围为sim2sim；未确认完整真机深度接入与G1部署配方。本次静态核验，未运行。对本项目可借鉴离线动作过渡数据生成与统一技能后端，语言任务规划和物体操作需另行接入。
+
+**关键 Q&A（2026-11-05）**：Q：Policy多大？A：论文附录表VI给出学生MLP隐藏层(2048,1024,512,256,128)，深度编码器为3层CNN＋GAP、输出32维。核对官方student-assets-v1的ONNX：学生MLP输入140、输出29，共3,079,709参数；深度CNN为25,632参数，合计3,105,341参数。教师／critic隐藏层为(512,256,128)，部署使用学生与深度编码器。
+
+Q（2026-11-10）：与 PhysHSI 有何异同？A：两者都用人体动作和在线仿真 RL 训练 G1 全身策略。PHP 将片段离线拼成带地形的逐帧参考，先训练特权跟踪专家，再用专家在学生采样状态上的动作标签和 PPO 共同训练统一深度策略。PhysHSI 按任务训练，示范用于 AMP 风格奖励和混合初态采样，策略依据物体状态与任务奖励完成交互。PHP 从单障碍训练迁移到多障碍串联，PhysHSI 验证同一交互在不同物体尺寸、位置和目标下的适应性。PHP 附录的 AMP 实验采用 MimicKit，因调参有限未列入正式对照。[PHP §III–IV](https://arxiv.org/html/2602.15827v2#S3)，[PHP 附录 C](https://arxiv.org/pdf/2602.15827v2#page=12)，[PhysHSI §III–V](https://arxiv.org/html/2510.11072v1#S3)。
+
+## Psi-0（Ψ₀）— An Open Foundation Model Towards Universal Humanoid Loco-Manipulation
+
+**推理数据流**
+
+```text
+头部相机图像 + 语言指令 → Qwen3-VL → 视觉语言特征
+视觉语言特征 + 当前本体观测 → 动作专家 MM-DiT
+  ↓
+未来 H 步动作（每步 36 维）
+  ├─ 28 维 → 双臂、双手关节目标
+  └─  8 维 → AMO → 15 个腰腿关节目标
+  ↓
+G1 执行 → 采集新观测
+```
+
+**训练数据流**
+
+| 阶段 | 数据怎么流 | 更新谁 |
+|---|---|---|
+| 预训练 | EgoDex 人体视频、Humanoid Everyday 机器人数据 → 双腕位姿和指尖位置 → FAST 动作 token → 预测下一步动作 token | Qwen3-VL |
+| 后训练 | Humanoid Everyday 的关节动作 → 给动作加噪 → 用视觉语言特征和本体状态做条件，以 flow matching 学习生成动作块 | 动作专家从头训练，VLM 冻结 |
+| 任务微调 | 每项任务 80 条 G1 遥操作轨迹 → 用示范中的全身动作块继续训练 | 主实验只微调动作专家，AMO 直接复用 |
+
+**重点关注**：False
+
+**开源情况**：[2026-11-10] sim复现、sim重新训练（SIMPLE任务微调）；直接部署（G1，AMO／SONIC对应版本）；[官方代码](https://github.com/physical-superintelligence-lab/Psi0)。
+
+**基本信息**：阅读日期 2026-11-10；arXiv上传 2026-03-12（v1）；共同一作 Songlin Wei、Hongyi Jing、Boqian Li、Zhenyu Zhao；通讯 Yue Wang；单位 USC PSI Lab、NVIDIA、WorldEngine；中稿 [RSS 2026](https://roboticsproceedings.org/rss22/p021.html)；[项目主页](https://psi-lab.ai/Psi0/)，[arXiv](https://arxiv.org/abs/2603.12263)。
+
+**核心问题**：如何用第一视角人类视频学习操作相关的视觉和动作表征，再用较少的真机示范学到 G1 可执行的灵巧移动操作。
+
+**系统拆解**：头部图像与语言指令经 VLM 编码，动作专家结合当前本体状态生成 36 维动作序列。28 维直接指定双臂与双手关节，其余 8 维由 AMO 转成 15 个腰腿关节目标，合计 43 维关节目标。以下为论文 AMO 版本。[§III／图2–4](https://arxiv.org/html/2603.12263v1#S3)
+
+| 一级组件／子模块 | 原文内部结构 | 输入 → 处理 → 输出 |
+|---|---|---|
+| System-2 → Vision–Language Backbone | Qwen3-VL-2B-Instruct | 头部图像＋指令 → 视觉语言编码 → 隐特征供动作专家使用。 |
+| System-1 → Action Expert | 约 500M 参数的 flow-based MM-DiT | VLM 隐特征＋本体状态 → 生成动作块 → 28 维手臂／手指关节目标＋8 维躯干、身高、速度与朝向命令。 |
+| System-1 → Real-Time Action Chunking | 训练时动作前缀补全 | 保留已承诺执行的动作前缀 → 异步补全后续动作 → 连续执行。 |
+| System-0 → Lower-Body Controller | AMO，预训练 RL 跟踪策略 | 8 维命令 → 15 维腰腿关节目标；与上肢目标一起执行。 |
+
+**训练、复用与新增**：先训练视觉动作表征，再学机器人关节空间动作，最后按目标任务适配。论文 §III-B 描述可进一步端到端微调，主实验 §IV-A 明确只微调动作专家，公开 AMO 配方也冻结 VLM。[§III–IV、附录VI](https://arxiv.org/html/2603.12263v1#S3)，[AMO 微调脚本](https://github.com/physical-superintelligence-lab/Psi0/blob/main/scripts/train/psi0/finetune-real-amo-psi0.sh)
+
+| 对应结构 | 训练、复用与数据 | 作者在本文中的设计 |
+|---|---|---|
+| System-2 → Vision–Language Backbone | 从 Qwen3-VL-2B-Instruct 初始化，依次在约 829 小时 EgoDex 和约 31 小时 Humanoid Everyday 上训练。FAST tokenizer 用 50 万条 EgoDex 动作样本拟合。 | 将双腕位姿和指尖位置统一成 48 维动作，自回归预测单步动作 token。 |
+| System-1 → Action Expert | 冻结 VLM，从头用 Humanoid Everyday 的手臂和手指关节动作训练 MM-DiT，缺失的下身维度填充。下游沿用该权重，每任务用 80 条 G1 遥操作轨迹微调动作专家。 | 用 flow matching 学连续动作块，真机示范补上对应任务的移动与操作协调。 |
+| System-1 → Real-Time Action Chunking | 与动作专家同训，复用示范动作块。 | 随机保留干净前缀并从损失中排除，训练模型接续已经进入执行队列的动作。 |
+| System-0 → Lower-Body Controller | 直接复用 AMO 策略，供真机遥操作采集与推理使用。 | 将上肢关节控制与腰腿跟踪接入同一动作接口。 |
+
+真机主实验为 8 项分别微调的长程任务，每项 10 次。按表 III 的完整任务成功数汇总，Psi-0 为 57/80（71.25%），GR00T N1.6 为 23/80（28.75%）。全部子任务完成才计整项成功，评估者可在子任务失败后协助推进以统计后续子任务。附录多任务微调消融仅覆盖三项，并报告单项成绩下降。[§IV-B、附录IX/X](https://arxiv.org/html/2603.12263v1#S4)
+
+官方提供预训练／后训练和任务微调代码、[权重](https://huggingface.co/USC-PSI-Lab/psi-model/tree/main/psi0)与[示范数据](https://huggingface.co/datasets/USC-PSI-Lab/psi-data/tree/main)。[SIMPLE 指南](https://github.com/physical-superintelligence-lab/SIMPLE/blob/main/docs/source/tutorials/wholebody_loco_manipulation.md)给出仿真闭环评测入口，Psi-0 仓库提供任务微调脚本。当前 README 部分旧脚本名已失效，仿真入口按任务看 [MP／解耦 WBC／SONIC 脚本](https://github.com/physical-superintelligence-lab/Psi0/tree/main/scripts/train/psi0)。后来发布的 [SONIC 真机版本](https://github.com/physical-superintelligence-lab/Psi0/blob/main/examples/psi0_for_sonic.md)配有单独权重与部署流程。本文结果对应 AMO 实验。本次静态核验。
+
+**关键 Q&A**：Q：与 PhysHSI 的训练信号有什么区别？A：PhysHSI 的 actor 在仿真里采样，用 PPO 最大化任务与 AMP 风格回报。Psi-0 的 VLA 从离线动作标签学习，预训练预测动作 token，后训练及微调用示范动作块做 flow matching；RL 在复用的底层 AMO 控制器中。[PhysHSI §III](https://arxiv.org/html/2510.11072v1#S3)，[Psi-0 §III](https://arxiv.org/html/2603.12263v1#S3)
+
+## ExoActor — Exocentric Video Generation as Generalizable Interactive Humanoid Control
+
+[论文](https://arxiv.org/html/2604.27711) · [项目主页](https://baai-agents.github.io/ExoActor/)
+
+**作者** Yanghao Zhou、Jingyu Ma（并列一作），通讯 Yu Bai。单位为北京智源人工智能研究院。**录用** 未查到公开录用记录。
+
+**论文公开日期** 2026-04-30 · **代码与录用核查日期** 2026-11-16
+
+**开源情况** 完整实现未公开。项目页代码入口返回 404，缺视频到动作的集成与真机运行入口。
+
+**核心问题** 如何把第三人称场景图像和任务指令转成 G1 可执行的全身交互动作。
+
+**推理数据流**
+
+```text
+第三人称初始图像 → 将画面中的机器人转换为人体图像
+任务指令 → 分解成动作序列 → 与初始图像一起生成第三人称视频
+生成视频 → GENMO 恢复全身运动，另估计手部动作
+固定全身参考 + 本体观测 → SONIC → G1 跟踪，手指由独立控制接口执行
+```
+
+**训练数据流**
+
+```text
+复用预训练图像编辑、视频生成、动作估计模型和 SONIC
+新任务输入 → 生成视频并恢复动作参考 → 无逐任务训练
+```
+
+## GenHOI — Contact-Aware Humanoid-Object Interaction by Imitating Generated Videos without Task-Specific Training
+
+[论文](https://arxiv.org/html/2606.12995v2) · [项目主页](https://genhoi-humanoid.github.io/) · [代码](https://anonymous.4open.science/r/Gen-HOI-CA67)
+
+**作者** 毕志海、Qiang Zhang，通讯马骏。单位为香港科技大学（广州）、中国科学技术大学人工通用智能研究院、香港大学、新加坡国立大学。**录用** 未查到公开录用记录。
+
+**论文公开日期** 2026-06-11 · **代码与录用核查日期** 2026-11-16
+
+**开源情况** sim复现（示例视频、接触估计、轨迹优化、MuJoCo 与 SONIC 入口）。真机侧公开了里程计接入与轨迹跟踪脚本，完整物体定位与部署流程未核实。无逐任务训练。
+
+**核心问题** 如何把生成视频中的手物接触转成符合实测物体位置的全身轨迹，让 G1 能抓箱、搬椅和抬桌。
+
+**推理数据流**
+
+```text
+机载相机测物体位姿 + LiDAR 定位 → 在 MuJoCo 重建场景并渲染首帧
+首帧 + 指令 → 生成视频 → 提取全身动作及手物接触约束
+动作 + 接触约束 + 实测物体位姿 → 优化 G1 参考轨迹
+轨迹 + 实时里程计 → 基于 SONIC 的控制器 → 下身跟踪根部路径，上身跟踪关节参考
+```
+
+**训练数据流**
+
+```text
+复用预训练视觉模型、动作估计模型和 SONIC
+单条生成视频 → 按当前物体位姿优化轨迹 → 无逐任务训练
+```
+
+## GR00T 2 — Scaling Robot Foundation Models for Generalization, Dexterity, and Adaptation
+
+[论文](https://research.nvidia.com/labs/gear/gr00t-2/assets/gr00t2_whitepaper.pdf) · [项目主页](https://research.nvidia.com/labs/gear/gr00t-2/)
+
+**作者** NVIDIA（技术报告集体署名）。**录用** 在 CoRL 2026 期间发布，未查到正式录用记录。
+
+**论文公开日期** 2026-11-09（官方发布公告） · **代码与录用核查日期** 2026-11-16
+
+**开源情况** GR00T 2 Turbo 的代码和权重尚未公开，项目页预告代码于 12 月开放。底层 SONIC 已公开。
+
+**核心问题** 如何让机载视觉模型根据任务生成全身动作，由 SONIC 执行走动、抓取和投放等连续操作。
+
+**推理数据流**
+
+```text
+头部及双腕 RGB + 本体观测 + 指令 → GR00T 2 Turbo（约 1 Hz）
+→ 未来 1.6 秒的 SONIC 运动 token 和夹爪宽度命令
+运动 token + 当前本体观测 → SONIC（50 Hz）→ 关节位置目标 → G1 PD 执行
+夹爪宽度命令 → 夹爪控制
+```
+
+**训练数据流**
+
+| 阶段 | 数据怎么流 | 更新谁 |
+|---|---|---|
+| 预训练 | 人体第一视角视频、手部轨迹与机器人示范 → 先预测未来视频，再用 flow matching 联合学习视频与动作 | 基于 Cosmos-Predict2.5 初始化的模型 |
+| G1 移动操作 | 真机遥操作直接记录 SONIC token 和夹爪宽度，部分动作通过相同 SONIC 在仿真回放并扩增场景 → 用实机和合成示范训练 | GR00T 2 Turbo，SONIC 复用 |
+
+## Workhorse — Learning Robust Whole-Body Humanoid Loco-Manipulation from Human Data
+
+[论文](https://arxiv.org/html/2610.09117v2) · [项目主页](https://hybridrobotics.github.io/workhorse/)
+
+**作者** Songbo Hu、廖洽源（并列一作）。单位为加州大学伯克利分校。**录用** 未查到公开录用记录。
+
+**论文公开日期** 2026-10-06 · **代码与录用核查日期** 2026-11-16
+
+**开源情况** 完全没开源（项目页注明代码尚未发布）。
+
+**核心问题** 如何用穿戴式人体示范训练 G1，在搬箱过程中根据视觉变化持续调整全身动作。
+
+**推理数据流**
+
+```text
+机载 RGB + 躯干、双腕、双足的位姿历史 → 视觉规划器（5 Hz）
+→ 五个身体部位的未来位姿 + 本体观测 → 全身跟踪器（50 Hz）
+→ 关节位置目标 → G1 执行 → 新观测用于重规划
+```
+
+**训练数据流**
+
+| 阶段 | 数据怎么流 | 更新谁 |
+|---|---|---|
+| 视觉规划 | 人体胸前 RGB + 五个 Vive 位姿 → 图像和历史扰动增强 → 用 flow matching 学习未来五部位轨迹 | 视觉规划器 |
+| 全身跟踪 | 人体位姿提供跟踪目标，mjlab 转移拟合动力学模型 → 在想象轨迹中优化跟踪回报 | 动力学模型与跟踪器。跟踪设计沿用 BeyondMimic，训练方法沿用 SuperMimic，按机器人和任务训练 |
+
+## HALO — Perceptive Humanoid Motion from Simulation
+
+[论文](https://arxiv.org/html/2611.06908v1) · [项目主页](https://apple-aiml-research.github.io/ml-halo/) · [代码](https://github.com/apple-aiml-research/ml-halo)
+
+**作者** Siyuan Hu、Abulikemu Abuduweili。单位为 Apple。**录用** 未查到公开录用记录。
+
+**论文公开日期** 2026-11-04 · **代码与录用核查日期** 2026-11-16
+
+**开源情况** 公开数据生成、训练和 G1 部署代码。可按公开流程生成数据并重新训练（文档示例为坐沙发）。闭环仿真推理和直接真机运行均需自训权重，仓库未附训练集和权重。
+
+**核心问题** 如何用仿真生成视觉和动作训练数据，让 G1 在陌生室内环境根据机载视觉完成推箱、坐椅等全身任务。
+
+**推理数据流**
+
+```text
+语言请求 + 第一视角 RGB → VLM 生成子任务
+子任务 + 最新 RGB → 动作生成器（约 3 Hz）→ 未来 5 秒的全身关节和根部轨迹
+全身轨迹 + 机载深度 + 本体观测 → 运动跟踪器（50 Hz）
+→ 关节位置目标 → G1 PD 执行
+```
+
+**训练数据流**
+
+| 阶段 | 数据怎么流 | 更新谁 |
+|---|---|---|
+| 动作生成 | Infinigen 生成室内场景，Kimodo 生成约束动作 → 仿真渲染 RGB 与配对轨迹 → flow matching | 动作生成器 |
+| 运动跟踪 | 合成轨迹与重定向 LAFAN1 → PPO 训练特权教师 → 行为克隆与 DAgger 蒸馏出深度学生 → 多 Critic PPO 微调 | 各任务教师与统一学生 |

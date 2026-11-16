@@ -1,0 +1,13 @@
+{
+    "favorites.resources": [
+        {
+            "filePath": "AGENTS.md",
+            "group": "Default"
+        },
+        {
+            "filePath": "papers.md",
+            "group": "Default"
+        }
+    ],
+    "favorites.sortOrder": "MANUAL"
+}
